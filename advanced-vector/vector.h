@@ -112,7 +112,7 @@ public:
         : buffer_(std::exchange(other.buffer_, nullptr)), capacity_(std::exchange(other.capacity_, 0)) {}
 
     RawMemory& operator=(RawMemory&& rhs) noexcept {
-        if (rhs.capacity_ > capacity_){
+        if (this != &rhs) {
             Swap(rhs);
         }
         return *this;
