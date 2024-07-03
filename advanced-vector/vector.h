@@ -351,7 +351,7 @@ public:
      *  После разрушения объекта в конце вектора и обновления поля size_ удаление элемента можно считать завершённым
      */
     iterator Erase(const_iterator it_pos) /*noexcept(std::is_nothrow_move_assignable_v<T>)*/ {
-        assert((it_pos >= begin()) && (it_pos <= end()));
+        assert((it_pos >= begin()) && (it_pos < end()));
         size_t index = static_cast<size_t>(it_pos - data_.GetAddress());
         if constexpr (std::is_nothrow_move_constructible_v<T> || !std::is_copy_constructible_v<T>) {
             std::move(begin() + index + 1, end(), begin() + index);
