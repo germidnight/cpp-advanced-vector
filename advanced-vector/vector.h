@@ -109,17 +109,11 @@ public:
     RawMemory& operator=(const RawMemory& rhs) = delete;
 
     RawMemory(RawMemory &&other) noexcept
-        : buffer_(std::move(other.buffer_)), capacity_(std::exchange(other.capacity_, 0)) {
-        other.buffer_ = nullptr;
-    }
+        : buffer_(std::exchange(other.buffer_, nullptr)), capacity_(std::exchange(other.capacity_, 0)) {}
 
     RawMemory& operator=(RawMemory&& rhs) noexcept {
         if (rhs.capacity_ > capacity_){
-            Deallocate(buffer_);
-            buffer_ = std::move(rhs.buffer_);
-            rhs.buffer_ = nullptr;
-            capacity_ = std::move(rhs.capacity_);
-            rhs.capacity_ = 0;
+            Swap(rhs);
         }
         return *this;
     }
@@ -236,26 +230,10 @@ public:
     Vector& operator=(const Vector& rhs) {
         if (this != &rhs) {
             if (rhs.size_ > data_.Capacity()) {
-                /*места не хватает - по любому copy and swap*/
                 Vector rhs_copy(rhs);
                 Swap(rhs_copy);
             } else {
-                /* места хватает, значит можно соптимизировать */
-                if (rhs.size_ < size_) {
-                    /*скопировать имеющиеся элементы из источника в приёмник, а избыточные элементы вектора-приёмника разрушить*/
-                    for (size_t i = 0; i != rhs.size_; ++i) {
-                        data_[i] = rhs.data_[i];
-                    }
-                    std::destroy_n(data_.GetAddress() + rhs.size_, size_ - rhs.size_);
-                } else {
-                    /*присвоить существующим элементам приёмника значения соответствующих элементов источника,
-                    а оставшиеся скопировать в свободную область*/
-                    for (size_t i = 0; i != size_; ++i) {
-                        data_[i] = rhs.data_[i];
-                    }
-                    std::uninitialized_copy_n(rhs.data_.GetAddress() + size_, rhs.size_ - size_, data_.GetAddress() + size_);
-                }
-                size_ = rhs.size_;
+                OptimizedRhsCopy(rhs);
             }
         }
         return *this;
@@ -263,8 +241,7 @@ public:
 
     Vector& operator=(Vector&& rhs) noexcept {
         if (this != &rhs) {
-            data_ = std::move(rhs.data_);
-            size_ = std::exchange(rhs.size_, 0);
+            Swap(rhs);
         }
         return *this;
     }
@@ -290,24 +267,15 @@ public:
     }
 
     void PopBack() noexcept {
-        std::destroy_at(data_.GetAddress() + size_ - 1);
-        --size_;
+        if (size_ != 0) {
+            std::destroy_at(data_.GetAddress() + size_ - 1);
+            --size_;
+        }
     }
 
     template <typename... Args>
     T& EmplaceBack(Args&&... args) {
-        /*сначала надо создать копию объекта в позиции size_, а потом переместить существующие элементы.*/
-        if (size_ == data_.Capacity()) {
-            RawMemory<T> new_data(size_ == 0 ? 1 : size_ * 2);
-            std::construct_at(new_data.GetAddress() + size_, std::forward<Args>(args)...);
-            UnitializedMoveOrCopy_n(data_.GetAddress(), size_, new_data.GetAddress());
-            std::destroy_n(data_.GetAddress(), size_);
-            data_.Swap(new_data);
-        } else {
-            std::construct_at(data_.GetAddress() + size_, std::forward<Args>(args)...);
-        }
-        ++size_;
-        return data_[size_ - 1];
+        return *(Emplace(cend(), std::forward<Args>(args)...));
     }
 
     using iterator = T *;
@@ -333,7 +301,8 @@ public:
     }
 
     template <typename... Args>
-    iterator Emplace(const_iterator it_pos, Args&&...args) {
+    iterator Emplace(const_iterator it_pos, Args&&... args) {
+        assert((it_pos >= begin()) && (it_pos <= end()));
         size_t index = static_cast<size_t>(it_pos - data_.GetAddress());
         if (size_ == data_.Capacity()) {
             /* 1) выделить новый блок сырой памяти с удвоенной вместимостью
@@ -377,10 +346,12 @@ public:
         return data_.GetAddress() + index;
     }
 
+    /* Сначала на место удаляемого элемента нужно переместить следующие за ним элементы.
+     * После перемещения элементов в конце вектора останется «пустой» элемент, значение которого содержится в предыдущем элементе
+     *  После разрушения объекта в конце вектора и обновления поля size_ удаление элемента можно считать завершённым
+     */
     iterator Erase(const_iterator it_pos) /*noexcept(std::is_nothrow_move_assignable_v<T>)*/ {
-        /*Сначала на место удаляемого элемента нужно переместить следующие за ним элементы.
-        После перемещения элементов в конце вектора останется «пустой» элемент, значение которого содержится в предыдущем элементе
-        После разрушения объекта в конце вектора и обновления поля size_ удаление элемента можно считать завершённым*/
+        assert((it_pos >= begin()) && (it_pos <= end()));
         size_t index = static_cast<size_t>(it_pos - data_.GetAddress());
         if constexpr (std::is_nothrow_move_constructible_v<T> || !std::is_copy_constructible_v<T>) {
             std::move(begin() + index + 1, end(), begin() + index);
@@ -409,6 +380,20 @@ private:
         } else {
             std::uninitialized_copy_n(from_addr, count, to_addr);
         }
+    }
+
+    /* Выполнить одно из, в зависимости о того, размер чего меньше:
+     * - скопировать имеющиеся элементы из источника в приёмник, а избыточные элементы вектора-приёмника разрушить
+     * - присвоить существующим элементам приёмника значения соответствующих элементов источника, а оставшиеся скопировать в свободную область
+     */
+    void OptimizedRhsCopy(const Vector& rhs) {
+        std::copy(rhs.begin(), rhs.begin() + std::min(size_, rhs.size_), begin());
+        if (rhs.size_ < size_) {
+            std::destroy_n(data_.GetAddress() + rhs.size_, size_ - rhs.size_);
+        } else {
+            std::uninitialized_copy_n(rhs.data_.GetAddress() + size_, rhs.size_ - size_, data_.GetAddress() + size_);
+        }
+        size_ = rhs.size_;
     }
 
     RawMemory<T> data_;
